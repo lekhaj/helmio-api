@@ -6,11 +6,11 @@ import os
 load_dotenv()
 
 from app.database import engine, Base
-from app.routers import tasks, feedback
+from app.routers import tasks, feedback, projects, developers, weekly_plans, plan_tasks
 
 Base.metadata.create_all(bind=engine)
 
-app = FastAPI(title="Helmio API", version="0.1.0")
+app = FastAPI(title="Helmio API", version="0.2.0")
 
 origins = [o.strip() for o in os.getenv("CORS_ORIGINS", "http://localhost:3000").split(",")]
 
@@ -24,6 +24,10 @@ app.add_middleware(
 
 app.include_router(tasks.router)
 app.include_router(feedback.router)
+app.include_router(projects.router)
+app.include_router(developers.router)
+app.include_router(weekly_plans.router)
+app.include_router(plan_tasks.router)
 
 
 @app.get("/health")
