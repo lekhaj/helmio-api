@@ -13,7 +13,7 @@ from botocore.exceptions import ClientError
 logger = logging.getLogger(__name__)
 
 MODEL_ID = "global.anthropic.claude-sonnet-4-6"  # global inference profile = cheapest routing
-MAX_TOKENS = 3000
+MAX_TOKENS = 5000  # rich plan: ~12 tasks + metrics + risks + analysis
 
 _client = None
 
