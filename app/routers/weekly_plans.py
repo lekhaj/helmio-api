@@ -3,7 +3,7 @@ from sqlalchemy.orm import Session
 from typing import List
 from app import models, schemas
 from app.database import get_db
-from app.services.plan_generator import generate_stub_tasks
+from app.services.plan_generator import generate_plan_tasks
 
 router = APIRouter(prefix="/weekly-plans", tags=["weekly-plans"])
 
@@ -39,7 +39,6 @@ def delete_plan(plan_id: int, db: Session = Depends(get_db)):
 
 @router.post("/{plan_id}/generate", response_model=schemas.WeeklyPlanOut)
 def generate_plan(plan_id: int, body: schemas.WeeklyPlanGenerate, db: Session = Depends(get_db)):
-    """Stub: returns mock generated tasks. Replaced by Bedrock in Phase 2."""
     plan = db.get(models.WeeklyPlan, plan_id)
     if not plan:
         raise HTTPException(status_code=404, detail="Weekly plan not found")
@@ -50,11 +49,15 @@ def generate_plan(plan_id: int, body: schemas.WeeklyPlanGenerate, db: Session = 
     if body.context is not None:
         plan.context = body.context
 
-    # clear existing tasks
     db.query(models.PlanTask).filter(models.PlanTask.weekly_plan_id == plan_id).delete()
 
     devs = db.query(models.Developer).all()
-    generated = generate_stub_tasks(prompt=body.prompt, goal=plan.goal or "", devs=devs)
+    generated = generate_plan_tasks(
+        prompt=body.prompt,
+        goal=plan.goal or "",
+        context=plan.context or "",
+        devs=devs,
+    )
 
     for idx, t in enumerate(generated):
         db.add(
@@ -69,7 +72,7 @@ def generate_plan(plan_id: int, body: schemas.WeeklyPlanGenerate, db: Session = 
             )
         )
 
-    plan.llm_response_raw = {"source": "stub", "task_count": len(generated)}
+    plan.llm_response_raw = {"source": "bedrock", "model": "claude-sonnet-4-6", "task_count": len(generated)}
     plan.status = models.PlanStatus.active
     db.commit()
     db.refresh(plan)
