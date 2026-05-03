@@ -6,7 +6,7 @@ import os
 load_dotenv()
 
 from app.database import engine, Base
-from app.routers import tasks, feedback, projects, developers, weekly_plans, plan_tasks
+from app.routers import tasks, feedback, projects, developers, weekly_plans, plan_tasks, clarify
 
 Base.metadata.create_all(bind=engine)
 
@@ -28,6 +28,7 @@ app.include_router(projects.router)
 app.include_router(developers.router)
 app.include_router(weekly_plans.router)
 app.include_router(plan_tasks.router)
+app.include_router(clarify.router)
 
 
 @app.get("/health")

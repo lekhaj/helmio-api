@@ -1,4 +1,8 @@
-"""AWS Bedrock plan generator — Claude Sonnet 4.6, Flex tier."""
+"""AWS Bedrock plan generator — Claude Sonnet 4.6, Flex tier.
+
+Produces a structured weekly plan: analysis (gaps), daily tasks, metrics, risks.
+Plan is constrained by project context + this-week inputs (no random tasks).
+"""
 from typing import List, Dict, Any
 import json
 import logging
@@ -9,7 +13,7 @@ from botocore.exceptions import ClientError
 logger = logging.getLogger(__name__)
 
 MODEL_ID = "anthropic.claude-sonnet-4-6-20250514-v1:0"
-MAX_TOKENS = 1024
+MAX_TOKENS = 3000
 
 _client = None
 
@@ -21,118 +25,206 @@ def _bedrock():
     return _client
 
 
-def _build_prompt(prompt: str, goal: str, context: str, dev_names: List[str]) -> str:
-    devs_str = ", ".join(dev_names) if dev_names else "unassigned"
-    return f"""You are a senior engineering manager helping plan a software sprint.
+SYSTEM = """You are an execution strategist for early-stage software teams.
+Your job:
+1. Read project context + this week's inputs
+2. Identify the highest-impact gaps preventing progress
+3. Convert gaps into concrete daily tasks (Mon-Fri) for the developer
+4. Add handoff tasks for collaborators (artist review, QA) where needed
+5. Define measurable success metrics tied to tasks
+6. Flag risks with mitigation
 
-Project goal this week: {goal or "Not specified"}
-Additional context: {context or "None"}
-Research prompt from user: {prompt}
-Available team members: {devs_str}
-
-Generate a realistic, actionable weekly task list for this sprint.
 Rules:
-- Between 6 and 10 tasks
-- Total effort_hours must not exceed 40h
-- Each task effort_hours between 1 and 8
-- Assign tasks evenly across team members (use exact names from the list, or null for unassigned)
-- Priority: "high", "medium", or "low"
-- Titles should be concrete and action-oriented (start with a verb)
-
-Respond ONLY with a JSON array — no markdown, no explanation, nothing else:
-[
-  {{
-    "title": "string",
-    "description": "one-sentence description",
-    "effort_hours": 4,
-    "priority": "medium",
-    "assignee_name": "Developer Name or null"
-  }}
-]"""
+- Focus only on THIS WEEK execution
+- Prefer fewer high-impact tasks over many low-value ones
+- Each developer task: 2-8 hours, completable in one day
+- Tasks must be specific and action-oriented (start with a verb)
+- Avoid vague work ("improve X", "optimize Y") — name the specific thing
+- Total developer effort must not exceed time_available_hours
+- Spread tasks across Mon-Fri (day_index 0-4); leave Friday lighter for review
+- Handoff tasks (is_handoff: true) go to artist/QA, do NOT count toward dev hours but should be scheduled
+- Tie each task to a key gap or named outcome
+- Include validation/measurement steps
+- Output ONLY valid JSON, no markdown fences, no commentary"""
 
 
-def generate_plan_tasks(
-    prompt: str,
-    goal: str,
-    context: str,
+def _build_user_prompt(
+    project: Dict[str, Any],
+    weekly: Dict[str, Any],
+    devs: List[str],
+    previous: Dict[str, Any],
+) -> str:
+    return f"""Plan this developer's sprint week.
+
+[PROJECT CONTEXT]
+{json.dumps(project, indent=2)}
+
+[CURRENT STATUS / THIS WEEK]
+{json.dumps(weekly, indent=2)}
+
+[TEAM]
+Available people for handoffs / review: {", ".join(devs) if devs else "(developer only)"}
+
+[PREVIOUS WEEK]
+{json.dumps(previous, indent=2)}
+
+Now produce the plan. Return ONLY this JSON:
+
+{{
+  "analysis": {{
+    "current_stage_summary": "1-2 sentence read of where the project stands",
+    "key_gaps": [
+      {{"gap": "...", "impact": "high|medium|low", "reason": "..."}}
+    ]
+  }},
+  "plan": {{
+    "total_effort_hours": 0,
+    "feasible": true,
+    "tasks": [
+      {{
+        "title": "verb-first concrete task",
+        "description": "1 sentence",
+        "effort_hours": 4,
+        "priority": "high|medium|low",
+        "day_index": 0,
+        "depends_on": ["other task title"],
+        "expected_outcome": "what success looks like",
+        "is_handoff": false,
+        "assignee_name": "Developer Name or null"
+      }}
+    ]
+  }},
+  "metrics": [
+    {{ "metric": "Plan generation time", "target": "< 10s", "linked_tasks": ["task title"] }}
+  ],
+  "risks": [
+    {{ "risk": "...", "mitigation": "..." }}
+  ]
+}}"""
+
+
+def generate_rich_plan(
+    project: Dict[str, Any],
+    weekly: Dict[str, Any],
     devs: List[Any],
-) -> List[Dict[str, Any]]:
+    previous: Dict[str, Any] | None = None,
+) -> Dict[str, Any]:
     dev_names = [d.name for d in devs] if devs else []
     dev_map = {d.name: d.id for d in devs} if devs else {}
-
-    user_prompt = _build_prompt(prompt, goal, context, dev_names)
+    user_prompt = _build_user_prompt(project, weekly, dev_names, previous or {})
 
     try:
         response = _bedrock().invoke_model(
             modelId=MODEL_ID,
             contentType="application/json",
             accept="application/json",
-            performanceConfigLatency="optimized",  # Flex tier — cheaper, async-safe
+            performanceConfigLatency="optimized",
             body=json.dumps({
                 "anthropic_version": "bedrock-2023-05-31",
                 "max_tokens": MAX_TOKENS,
+                "system": SYSTEM,
                 "messages": [{"role": "user", "content": user_prompt}],
             }),
         )
         raw = json.loads(response["body"].read())
         text = raw["content"][0]["text"].strip()
-
-        # strip accidental markdown fences
         if text.startswith("```"):
             text = text.split("```")[1]
             if text.startswith("json"):
                 text = text[4:]
-        tasks_raw = json.loads(text)
+        data = json.loads(text.strip())
+    except (ClientError, KeyError, json.JSONDecodeError, IndexError) as e:
+        logger.error("Bedrock rich-plan error: %s", e)
+        return _fallback(weekly)
 
-    except ClientError as e:
-        logger.error("Bedrock ClientError: %s", e)
-        return _fallback(prompt, goal, devs)
-    except (KeyError, json.JSONDecodeError, IndexError) as e:
-        logger.error("Bedrock parse error: %s", e)
-        return _fallback(prompt, goal, devs)
+    return _normalize(data, dev_map)
 
-    tasks: List[Dict[str, Any]] = []
+
+def _normalize(data: Dict[str, Any], dev_map: Dict[str, int]) -> Dict[str, Any]:
+    analysis = data.get("analysis", {}) or {}
+    plan = data.get("plan", {}) or {}
+    tasks_raw = plan.get("tasks", []) or []
+
+    tasks = []
     for t in tasks_raw:
         name = t.get("assignee_name")
         assignee_id = dev_map.get(name) if name and name != "null" else None
+        di = t.get("day_index")
+        try:
+            di = int(di) if di is not None else None
+            if di is not None and (di < 0 or di > 6):
+                di = None
+        except (ValueError, TypeError):
+            di = None
         tasks.append({
             "title": str(t.get("title", "Task"))[:255],
             "description": str(t.get("description", ""))[:500],
-            "effort_hours": max(1, min(8, int(t.get("effort_hours", 4)))),
-            "priority": t.get("priority", "medium") if t.get("priority") in ("high", "medium", "low") else "medium",
+            "effort_hours": max(1, min(12, int(t.get("effort_hours", 4) or 4))),
+            "priority": t.get("priority") if t.get("priority") in ("high", "medium", "low") else "medium",
+            "day_index": di,
+            "depends_on": [str(x)[:255] for x in (t.get("depends_on") or []) if x][:5],
+            "expected_outcome": str(t.get("expected_outcome", ""))[:300],
+            "is_handoff": bool(t.get("is_handoff", False)),
             "assignee_id": assignee_id,
         })
-    return tasks[:10]
+
+    metrics = []
+    for m in data.get("metrics", []) or []:
+        if not m.get("metric"):
+            continue
+        metrics.append({
+            "name": str(m["metric"])[:255],
+            "target": str(m.get("target", ""))[:255],
+            "linked_task_titles": [str(x)[:255] for x in (m.get("linked_tasks") or [])][:5],
+        })
+
+    risks = []
+    for r in data.get("risks", []) or []:
+        if not r.get("risk"):
+            continue
+        risks.append({
+            "risk": str(r["risk"])[:500],
+            "mitigation": str(r.get("mitigation", ""))[:500],
+        })
+
+    return {
+        "analysis_summary": str(analysis.get("current_stage_summary", ""))[:500],
+        "key_gaps": [
+            {
+                "gap": str(g.get("gap", ""))[:300],
+                "impact": g.get("impact") if g.get("impact") in ("high", "medium", "low") else "medium",
+                "reason": str(g.get("reason", ""))[:300],
+            }
+            for g in (analysis.get("key_gaps") or [])[:5]
+        ],
+        "tasks": tasks[:14],
+        "metrics": metrics[:6],
+        "risks": risks[:5],
+        "raw": data,
+    }
 
 
-def _fallback(prompt: str, goal: str, devs: List[Any]) -> List[Dict[str, Any]]:
-    """Minimal fallback used only when Bedrock is unreachable."""
-    import re
-    text = f"{goal}. {prompt}".lower()
-    themes = []
-    for kw, label in [
-        (r"\b(auth|login|signup)\b", "Authentication"),
-        (r"\b(dashboard|metrics|analytics)\b", "Analytics dashboard"),
-        (r"\b(api|endpoint|backend)\b", "API"),
-        (r"\b(ui|design|frontend)\b", "Frontend"),
-        (r"\b(test|qa)\b", "Testing"),
-        (r"\b(deploy|infra)\b", "Deployment"),
-    ]:
-        if re.search(kw, text):
-            themes.append(label)
-    if not themes:
-        themes = ["Discovery", "Implementation", "Validation"]
-
-    dev_ids = [d.id for d in devs] if devs else [None]
-    tasks, i = [], 0
-    for theme in themes[:4]:
-        for verb in ("Design", "Implement"):
-            tasks.append({
-                "title": f"{verb} — {theme}",
-                "description": "",
-                "effort_hours": [4, 6][i % 2],
-                "priority": ["high", "medium"][i % 2],
-                "assignee_id": dev_ids[i % len(dev_ids)] if dev_ids[0] else None,
-            })
-            i += 1
-    return tasks[:8]
+def _fallback(weekly: Dict[str, Any]) -> Dict[str, Any]:
+    goal = weekly.get("goal", "")
+    return {
+        "analysis_summary": "Bedrock unavailable — minimal fallback plan.",
+        "key_gaps": [],
+        "tasks": [
+            {
+                "title": "Define this week's first concrete output",
+                "description": f"From goal: {goal[:120]}",
+                "effort_hours": 4, "priority": "high", "day_index": 0,
+                "depends_on": [], "expected_outcome": "Clear scope for Tuesday work",
+                "is_handoff": False, "assignee_id": None,
+            },
+            {
+                "title": "Implement primary task",
+                "description": "", "effort_hours": 6, "priority": "high",
+                "day_index": 1, "depends_on": ["Define this week's first concrete output"],
+                "expected_outcome": "", "is_handoff": False, "assignee_id": None,
+            },
+        ],
+        "metrics": [],
+        "risks": [{"risk": "LLM unavailable", "mitigation": "Retry generate; check Bedrock IAM"}],
+        "raw": {"source": "fallback"},
+    }
