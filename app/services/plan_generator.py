@@ -114,11 +114,11 @@ def generate_rich_plan(
     user_prompt = _build_user_prompt(project, weekly, dev_names, previous or {})
 
     try:
+        # Flex tier not supported for Sonnet 4.6 in us-east-1 — using standard.
         response = _bedrock().invoke_model(
             modelId=MODEL_ID,
             contentType="application/json",
             accept="application/json",
-            performanceConfigLatency="optimized",
             body=json.dumps({
                 "anthropic_version": "bedrock-2023-05-31",
                 "max_tokens": MAX_TOKENS,

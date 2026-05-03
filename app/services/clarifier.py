@@ -142,11 +142,13 @@ Output ONLY this JSON, no markdown:
 def clarify(kind: str, user_text: str, known: Dict[str, Any], project_ctx: Dict[str, Any] | None = None) -> Dict[str, Any]:
     prompt = _build_prompt(kind, user_text, known, project_ctx)
     try:
+        # Note: Flex tier (performanceConfigLatency=optimized) is not supported
+        # for Sonnet 4.6 in us-east-1 — using standard latency. Cost levers we keep:
+        # base model ID (global routing), tight max_tokens, single call.
         response = _bedrock().invoke_model(
             modelId=MODEL_ID,
             contentType="application/json",
             accept="application/json",
-            performanceConfigLatency="optimized",
             body=json.dumps({
                 "anthropic_version": "bedrock-2023-05-31",
                 "max_tokens": MAX_TOKENS,
