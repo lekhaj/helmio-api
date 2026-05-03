@@ -13,7 +13,7 @@ from botocore.exceptions import ClientError
 
 logger = logging.getLogger(__name__)
 
-MODEL_ID = "anthropic.claude-sonnet-4-6-20250514-v1:0"
+MODEL_ID = "anthropic.claude-sonnet-4-6"
 MAX_TOKENS = 1200
 
 _client = None
